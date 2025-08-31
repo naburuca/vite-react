@@ -1,13 +1,359 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Vite + React + TS</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
-</html>
+import React, { useEffect, useRef, useState } from "react";
+
+// Touch‑Friendly Tennis Game (single React component)
+// - Works with keyboard (W/S or ArrowUp/ArrowDown)
+// - Works great on phones: drag on court or use on‑screen controls
+// - Simple tennis scoring: 0, 15, 30, 40, Deuce, Advantage, Game
+// - Pause/Resume, Reset, Speed control
+// Styling uses Tailwind (preloaded in this environment)
+
+export default function TennisGame() {
+  // Canvas & layout
+  const canvasRef = useRef(null);
+  const rafRef = useRef(0);
+  const containerRef = useRef(null);
+
+  // Game state
+  const [running, setRunning] = useState(false);
+  const [playerY, setPlayerY] = useState(0); // will be centered after mount
+  const [aiY, setAiY] = useState(0);
+  const [ball, setBall] = useState({ x: 0, y: 0, vx: 0, vy: 0, r: 8 });
+  const [dims, setDims] = useState({ w: 800, h: 450, padW: 12, padH: 90, margin: 12 });
+  const [speed, setSpeed] = useState(1); // 0.7 - 1.6
+  const [aiLevel, setAiLevel] = useState(0.9); // 0.6 (easy) - 1.0 (hard)
+  const [score, setScore] = useState({ playerPts: 0, aiPts: 0, games: { p: 0, a: 0 } });
+  const keysRef = useRef({ up: false, down: false });
+  const touchActiveRef = useRef(false);
+
+  // Resize canvas responsively
+  useEffect(() => {
+    const handleResize = () => {
+      const el = containerRef.current;
+      if (!el) return;
+      const maxW = el.clientWidth;
+      const maxH = Math.min(el.clientHeight || 9999, window.innerHeight - 160);
+      // Maintain 16:9 within container
+      let w = Math.min(maxW, 1000);
+      let h = (w * 9) / 16;
+      if (h > maxH) {
+        h = Math.max(300, maxH);
+        w = (h * 16) / 9;
+      }
+      const padH = Math.max(70, Math.min(140, h * 0.2));
+      setDims({ w: Math.floor(w), h: Math.floor(h), padW: Math.max(10, Math.floor(w*0.012)), padH: Math.floor(padH), margin: 12 });
+    };
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  // Initialize positions when dims change
+  useEffect(() => {
+    const yCenter = dims.h / 2 - dims.padH / 2;
+    setPlayerY(yCenter);
+    setAiY(yCenter);
+    resetBall(Math.random() < 0.5 ? -1 : 1);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dims.w, dims.h]);
+
+  // Game loop
+  useEffect(() => {
+    const ctx = canvasRef.current?.getContext("2d");
+    if (!ctx) return;
+
+    let last = performance.now();
+    const loop = (t) => {
+      const dt = Math.min(50, t - last); // clamp delta (ms)
+      last = t;
+      update(dt / 16.67); // normalize to ~60fps units
+      render(ctx);
+      rafRef.current = requestAnimationFrame(loop);
+    };
+
+    if (running) {
+      rafRef.current = requestAnimationFrame(loop);
+    }
+    return () => cancelAnimationFrame(rafRef.current);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running, playerY, aiY, ball, dims, speed, aiLevel]);
+
+  // Keyboard controls
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.repeat) return;
+      if (e.type === "keydown") {
+        if (e.key === "ArrowUp" || e.key === "w" || e.key === "W") keysRef.current.up = true;
+        if (e.key === "ArrowDown" || e.key === "s" || e.key === "S") keysRef.current.down = true;
+        if (e.key === " ") setRunning((r) => !r);
+      } else {
+        if (e.key === "ArrowUp" || e.key === "w" || e.key === "W") keysRef.current.up = false;
+        if (e.key === "ArrowDown" || e.key === "s" || e.key === "S") keysRef.current.down = false;
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKey);
+    };
+  }, []);
+
+  // Core update
+  const update = (step = 1) => {
+    const { w, h, padH, padW, margin } = dims;
+    // Move player with keyboard when active (ignore if touch controlling)
+    if (!touchActiveRef.current) {
+      const speedPx = 8 * speed * step;
+      let py = playerY + (keysRef.current.up ? -speedPx : 0) + (keysRef.current.down ? speedPx : 0);
+      py = Math.max(0, Math.min(h - padH, py));
+      if (py !== playerY) setPlayerY(py);
+    }
+
+    if (!running) return;
+
+    // AI follows ball with a little delay and target error
+    const targetY = ball.y - padH / 2 + (Math.random() - 0.5) * (40 * (1 - aiLevel));
+    const aiSpeed = 6 * speed * aiLevel * step;
+    let ny = aiY + Math.sign(targetY - aiY) * aiSpeed;
+    ny = Math.max(0, Math.min(h - padH, ny));
+    setAiY(ny);
+
+    // Ball physics
+    let { x, y, vx, vy, r } = ball;
+    x += vx * speed * step;
+    y += vy * speed * step;
+
+    // Top/bottom bounce
+    if (y - r < margin) { y = margin + r; vy = Math.abs(vy); }
+    if (y + r > h - margin) { y = h - margin - r; vy = -Math.abs(vy); }
+
+    // Left paddle (player)
+    const lpX = margin + padW;
+    if (x - r < lpX && x - r > margin) {
+      // Within paddle x range; check y overlap
+      if (y > playerY && y < playerY + padH) {
+        x = lpX + r;
+        vx = Math.abs(vx) * 1.03; // accelerate slightly
+        // add spin based on hit position
+        const rel = (y - (playerY + padH / 2)) / (padH / 2);
+        vy += rel * 4;
+      }
+    }
+
+    // Right paddle (AI)
+    const rpX = w - margin - padW;
+    if (x + r > rpX && x + r < w - margin) {
+      if (y > aiY && y < aiY + padH) {
+        x = rpX - r;
+        vx = -Math.abs(vx) * 1.03;
+        const rel = (y - (aiY + padH / 2)) / (padH / 2);
+        vy += rel * 4;
+      }
+    }
+
+    // Score: ball goes out left or right
+    if (x < 0) {
+      awardPoint("ai");
+      resetBall(1); // serve from AI side towards player
+      return;
+    }
+    if (x > w) {
+      awardPoint("player");
+      resetBall(-1);
+      return;
+    }
+
+    setBall({ x, y, vx, vy, r });
+  };
+
+  // Award point with tennis scoring logic
+  const awardPoint = (who) => {
+    setScore((s) => {
+      let p = s.playerPts;
+      let a = s.aiPts;
+      if (who === "player") p += 1; else a += 1;
+
+      // Game logic (win by 2 at 4+ points)
+      let pGame = s.games.p;
+      let aGame = s.games.a;
+      if ((p >= 4 || a >= 4) && Math.abs(p - a) >= 2) {
+        if (p > a) pGame += 1; else aGame += 1;
+        // reset points for next game
+        p = 0; a = 0;
+      }
+      return { playerPts: p, aiPts: a, games: { p: pGame, a: aGame } };
+    });
+  };
+
+  // Reset ball with direction dir (-1 left, 1 right)
+  const resetBall = (dir = 1) => {
+    const { w, h } = dims;
+    const speedBase = 6 + Math.random() * 2;
+    const angle = (Math.random() * 0.6 - 0.3); // small up/down
+    setBall({ x: w / 2, y: h / 2, vx: dir * speedBase, vy: speedBase * angle, r: 8 });
+  };
+
+  // Draw
+  const render = (ctx) => {
+    const { w, h, padH, padW, margin } = dims;
+    ctx.canvas.width = w;
+    ctx.canvas.height = h;
+
+    // Court background
+    ctx.fillStyle = "#0b7"; // tennis green
+    ctx.fillRect(0, 0, w, h);
+
+    // Net (center dashed line)
+    ctx.strokeStyle = "white";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([8, 10]);
+    ctx.beginPath();
+    ctx.moveTo(w / 2, margin);
+    ctx.lineTo(w / 2, h - margin);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Outer lines
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(margin, margin, w - margin * 2, h - margin * 2);
+
+    // Service lines (for looks)
+    ctx.beginPath();
+    ctx.moveTo(margin, h / 2);
+    ctx.lineTo(w - margin, h / 2);
+    ctx.moveTo(w / 4, margin);
+    ctx.lineTo(w / 4, h - margin);
+    ctx.moveTo((w * 3) / 4, margin);
+    ctx.lineTo((w * 3) / 4, h - margin);
+    ctx.stroke();
+
+    // Paddles
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(margin, playerY, padW, padH);
+    ctx.fillRect(w - margin - padW, aiY, padW, padH);
+
+    // Ball
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
+    ctx.fill();
+  };
+
+  // Helpers
+  const scoreText = (p, a) => {
+    // Convert to tennis notation
+    const map = ["0", "15", "30", "40"];
+    if (p >= 3 && a >= 3) {
+      if (p === a) return "Deuce";
+      return p > a ? "Ad You" : "Ad CPU";
+    }
+    return `${map[p] ?? "40+"} - ${map[a] ?? "40+"}`;
+  };
+
+  const handleCourtTouch = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const clientY = e.touches?.[0]?.clientY ?? e.clientY;
+    const y = clientY - rect.top - dims.padH / 2;
+    const clamped = Math.max(0, Math.min(dims.h - dims.padH, y));
+    setPlayerY(clamped);
+  };
+
+  return (
+    <div className="w-full flex flex-col items-center gap-4 p-4 select-none" ref={containerRef}>
+      <header className="w-full max-w-3xl flex items-center justify-between">
+        <h1 className="text-2xl font-bold">🎾 テニス（Pong風）</h1>
+        <div className="text-sm opacity-70">W/S・↑/↓・タッチで操作</div>
+      </header>
+
+      <div className="w-full max-w-3xl grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="col-span-2 flex flex-col items-center gap-3">
+          <div
+            className="relative w-full rounded-2xl shadow-lg overflow-hidden"
+            onTouchStart={(e) => { touchActiveRef.current = true; handleCourtTouch(e); }}
+            onTouchMove={handleCourtTouch}
+            onTouchEnd={() => { touchActiveRef.current = false; }}
+            onMouseMove={(e) => { if (e.buttons === 1) handleCourtTouch(e); }}
+            onMouseDown={handleCourtTouch}
+          >
+            <canvas ref={canvasRef} className="w-full h-auto block" />
+            {/* HUD overlay */}
+            <div className="absolute top-2 left-2 right-2 flex justify-between text-white drop-shadow">
+              <div className="px-2 py-1 bg-black/30 rounded-md">Games: You {score.games.p} – CPU {score.games.a}</div>
+              <div className="px-2 py-1 bg-black/30 rounded-md">Score: {scoreText(score.playerPts, score.aiPts)}</div>
+            </div>
+            {!running && (
+              <div className="absolute inset-0 bg-black/40 text-white flex flex-col items-center justify-center gap-3">
+                <div className="text-xl font-semibold">タップでパドル移動｜Spaceで開始/一時停止</div>
+                <button
+                  onClick={() => setRunning(true)}
+                  className="px-4 py-2 rounded-xl bg-white text-black font-semibold shadow active:scale-95"
+                >
+                  ▶︎ スタート
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* On‑screen controls for mobile */}
+          <div className="w-full grid grid-cols-3 gap-2">
+            <button
+              onClick={() => setRunning((r) => !r)}
+              className={`rounded-2xl p-3 font-semibold shadow ${running ? "bg-amber-200" : "bg-emerald-200"}`}
+            >{running ? "⏸ 一時停止" : "▶︎ 再開"}</button>
+            <button
+              onClick={() => { setScore({ playerPts: 0, aiPts: 0, games: { p: 0, a: 0 } }); resetBall(Math.random()<0.5?-1:1); }}
+              className="rounded-2xl p-3 font-semibold shadow bg-sky-200"
+            >🔄 リセット</button>
+            <button
+              onClick={() => resetBall(ball.vx>0?-1:1)}
+              className="rounded-2xl p-3 font-semibold shadow bg-fuchsia-200"
+            >🎾 サーブ</button>
+          </div>
+        </div>
+
+        {/* Right panel */}
+        <div className="col-span-1 flex flex-col gap-3">
+          <div className="rounded-2xl bg-white p-4 shadow">
+            <div className="font-semibold mb-2">難易度 & 速度</div>
+            <label className="text-sm block mb-1">CPU 強さ</label>
+            <input
+              type="range" min={0.6} max={1.0} step={0.05}
+              value={aiLevel}
+              onChange={(e) => setAiLevel(parseFloat(e.target.value))}
+              className="w-full"
+            />
+            <div className="text-sm text-gray-600">{(aiLevel*100).toFixed(0)}%</div>
+            <label className="text-sm block mt-3 mb-1">ゲーム速度</label>
+            <input
+              type="range" min={0.7} max={1.6} step={0.05}
+              value={speed}
+              onChange={(e) => setSpeed(parseFloat(e.target.value))}
+              className="w-full"
+            />
+            <div className="text-sm text-gray-600">x{speed.toFixed(2)}</div>
+          </div>
+
+          <div className="rounded-2xl bg-white p-4 shadow">
+            <div className="font-semibold mb-2">操作方法</div>
+            <ul className="list-disc pl-5 text-sm leading-6">
+              <li>スマホ: コート上をドラッグしてパドルを移動</li>
+              <li>PC: W/S または ↑/↓ キーで上下移動</li>
+              <li>スペースキーで開始/一時停止</li>
+              <li>サーブはいつでもボタンから可能</li>
+            </ul>
+          </div>
+
+          <div className="rounded-2xl bg-white p-4 shadow">
+            <div className="font-semibold mb-2">ルール（簡易）</div>
+            <p className="text-sm leading-6">
+              相手コートの外側へボールが抜けたらポイント。ポイントは 0 → 15 → 30 → 40 → Deuce/Ad を経て、2点差でゲーム獲得。先に複数ゲーム取った方が勝ち（このデモではゲーム数の上限は設けていません）。
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <footer className="text-xs text-gray-500 mt-2">Made with ❤️  React + Canvas + Tailwind</footer>
+    </div>
+  );
+}
+
